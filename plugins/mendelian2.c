@@ -42,6 +42,7 @@
 #include "bcftools.h"
 #include "regidx.h"
 #include "filter.h"
+#include "mendelian2-xy.h"
 
 // Logic of the filters: include or exclude sites which match the filters?
 #define FLT_INCLUDE 1
@@ -81,6 +82,7 @@ typedef struct
     int idx[3];         // VCF sample index of mom,dad,kid, in that order
     stats_t stats;      // per trio stats collected over all sites
     int fail, has_merr; // per site filtering and mendeian error info
+    int ped_sex;
     int sex_id;         // implicitly defined by rules (typically 1X=0, 2X=1), see str2sex_id
 }
 trio_t;
@@ -118,6 +120,7 @@ typedef struct _args_t
     int nref_only, nmany_als;   // per-site stats
     char *index_fn;
     int write_index;
+    xy_policy_t xy;
 }
 args_t;
 
@@ -148,6 +151,9 @@ static const char *usage_text(void)
         "   -W, --write-index[=FMT]         Automatically index the output files [off]\n"
         "\n"
         "Options:\n"
+        "       --child-sex male|female|unknown  Enable explicit XY policy (mother XX, father XY)\n"
+        "       --par-dir DIR              Four assembly-specific PAR/nonPAR BED[.gz] files\n"
+        "       --ypar-masked              Declare Y-PAR masked calling (flag; no value)\n"
         "   -m, --mode c|[adeEgmMS]         Output mode, the default is `-m c`. Multiple modes can be combined in VCF/BCF\n"
         "                                   output and the drop modes take precedence.\n"
         "                                   Text stats output:\n"
@@ -376,6 +382,7 @@ static void parse_ped(args_t *args, char *fname)
         args->ntrio++;
         hts_expand0(trio_t,args->ntrio,mtrio,args->trio);
         trio_t *trio = &args->trio[args->ntrio-1];
+        trio->ped_sex = sex;
         trio->idx[iDAD] = dad;
         trio->idx[iMOM] = mom;
         trio->idx[iKID] = kid;
@@ -450,12 +457,14 @@ static void init_data(args_t *args)
             {
                 args->trio[0].idx[iKID] = bcf_hdr_id2int(args->hdr, BCF_DT_SAMPLE, list[0]+3);
                 sex = "1X";
+                args->trio[0].ped_sex = 1;
 
             }
             else if ( strlen(list[0])>3 && !strncasecmp(list[0],"2X:",3) )
             {
                 args->trio[0].idx[iKID] = bcf_hdr_id2int(args->hdr, BCF_DT_SAMPLE, list[0]+3);
                 sex = "2X";
+                args->trio[0].ped_sex = 2;
             }
         }
         for (i=0; i<3; i++)
@@ -473,7 +482,31 @@ static void init_data(args_t *args)
         if ( !args->ntrio ) error("No complete trio present\n");
     }
 
+    if (args->xy.enabled) {
+        const char *tags[]={"XY_STATUS","XY_REASON","XY_REGION"};
+        for (i=0;i<3;i++) {
+            int id=bcf_hdr_id2int(args->hdr,BCF_DT_ID,tags[i]);
+            if (bcf_hdr_idinfo_exists(args->hdr,BCF_HL_INFO,id) &&
+                (bcf_hdr_id2type(args->hdr,BCF_HL_INFO,id)!=BCF_HT_STR ||
+                 bcf_hdr_id2length(args->hdr,BCF_HL_INFO,id)!=BCF_VL_FIXED ||
+                 bcf_hdr_id2number(args->hdr,BCF_HL_INFO,id)!=1))
+                error("Incompatible INFO/%s header: explicit XY policy requires Number=1,Type=String\n",tags[i]);
+        }
+        xy_load(&args->xy);
+        if (args->ntrio!=1) error("Explicit XY policy requires one unambiguous trio; split multi-family PED input\n");
+        int kid=args->trio[0].idx[iKID];
+        for (i=0;i<args->ntrio;i++) {
+            trio_t *t=&args->trio[i];
+            if (t->idx[iKID]!=kid) error("Explicit XY policy requires a unique child; split multi-child PED input\n");
+            if (args->xy.sex_set && t->ped_sex && args->xy.sex!=t->ped_sex) error("--child-sex conflicts with known PED/PFM child sex\n");
+        }
+    }
     args->hdr_out = bcf_hdr_dup(args->hdr);
+    if (args->xy.enabled) {
+        bcf_hdr_append(args->hdr_out,"##INFO=<ID=XY_STATUS,Number=1,Type=String,Description=\"Explicit native XY policy status\">");
+        bcf_hdr_append(args->hdr_out,"##INFO=<ID=XY_REASON,Number=1,Type=String,Description=\"Stable native XY policy reason\">");
+        bcf_hdr_append(args->hdr_out,"##INFO=<ID=XY_REGION,Number=1,Type=String,Description=\"Assembly-specific region; manifest names do not determine eligibility\">");
+    }
     if ( args->mode&MODE_ANNOTATE )
     {
         bcf_hdr_append(args->hdr_out,"##INFO=<ID=MERR,Number=1,Type=Integer,Description=\"Number of trios with Mendelian errors\">");
@@ -503,6 +536,8 @@ static void destroy_data(args_t *args)
     regidx_destroy(args->rules);
     regitr_destroy(args->itr);
     khash_str2int_destroy_free(args->str2sex_id);
+    free(args->xy.iv);
+    free(args->xy.manifest);
     free(args->trio);
     free(args->gt_arr);
     free(args->rule);
@@ -749,10 +784,12 @@ static int collect_stats(args_t *args, bcf1_t *rec)
     return ret;
 }
 
+#include "mendelian2-xy-eval.h"
+
 static int process_record(args_t *args, bcf1_t *rec)    // returns 1 to print rec, 0 to suppress printing
 {
     int skip_site = 0;
-    if ( rec->n_allele==1 || bcf_get_variant_types(rec)==VCF_REF )
+    if ( !args->xy.enabled && (rec->n_allele==1 || bcf_get_variant_types(rec)==VCF_REF) )
     {
         args->nref_only++;
         skip_site = 1;
@@ -764,7 +801,7 @@ static int process_record(args_t *args, bcf1_t *rec)    // returns 1 to print re
     }
     if ( skip_site ) return args->mode&MODE_DROP_SKIP ? 1 : 0;
 
-    int ret = collect_stats(args, rec);
+    int ret = args->xy.enabled ? collect_xy_stats(args, rec) : collect_stats(args, rec);
     if ( ret&HAS_MERR ) args->stats.nmerr++;
     if ( ret&HAS_MISS ) args->stats.nmiss++;
     if ( ret&HAS_GOOD ) args->stats.ngood++;
@@ -802,6 +839,16 @@ static void print_stats(args_t *args)
         if ( !log_fh ) error("Error: cannot write to %s\n", args->output_fname);
     }
 
+    if (args->xy.enabled) {
+        fprintf(log_fh,"# XY policy v1; counts are required-member nonreference records, not haplotype replay events\n");
+        fprintf(log_fh,"# XY_REGION\tregion\tN_evaluable\tE_violation\terror_rate\n");
+        for (int r=0;r<10;r++) {
+            uint64_t n=args->xy.counts[r][0]+args->xy.counts[r][1], e=args->xy.counts[r][1];
+            fprintf(log_fh,"XY_REGION\t%s\t%"PRIu64"\t%"PRIu64"\t",xy_regions[r],n,e);
+            if (n) fprintf(log_fh,"%.8g\n",(double)e/n); else fprintf(log_fh,"NA\n");
+            for (int j=0;j<15;j++) if (args->xy.counts[r][j]) fprintf(log_fh,"XY_REASON\t%s\t%s\t%"PRIu64"\n",xy_regions[r],xy_reasons[j],args->xy.counts[r][j]);
+        }
+    }
     fprintf(log_fh,"# Summary stats\n");
     fprintf(log_fh,"sites_ref_only\t%d\t# sites skipped because there was no ALT allele\n", args->nref_only);
     fprintf(log_fh,"sites_many_als\t%d\t# skipped because of too many ALT alleles\n", args->nmany_als);
@@ -872,6 +919,9 @@ int run(int argc, char **argv)
 
     static struct option loptions[] =
     {
+        {"child-sex",1,0,20},
+        {"par-dir",1,0,21},
+        {"ypar-masked",0,0,22},
         {"pfm",1,0,'p'},
         {"ped",1,0,'P'},
         {"mode",1,0,'m'},
@@ -897,6 +947,15 @@ int run(int argc, char **argv)
     {
         switch (c)
         {
+            case 20:
+                args->xy.enabled=args->xy.sex_set=1;
+                if (!strcmp(optarg,"male")) args->xy.sex=1;
+                else if (!strcmp(optarg,"female")) args->xy.sex=2;
+                else if (!strcmp(optarg,"unknown")) args->xy.sex=0;
+                else error("--child-sex must be male, female, or unknown\n");
+                break;
+            case 21: args->xy.enabled=1; args->xy.dir=optarg; break;
+            case 22: args->xy.enabled=1; args->xy.masked=1; break;
             case 'v':
                 if ( apply_verbosity(optarg) < 0 ) error("Could not parse argument: --verbosity %s\n", optarg);
                 break;
@@ -916,7 +975,16 @@ int run(int argc, char **argv)
                           case 'b': args->output_type = FT_BCF_GZ; break;
                           case 'u': args->output_type = FT_BCF; break;
                           case 'z': args->output_type = FT_VCF_GZ; break;
-                          case 'v': args->output_type = FT_VCF; break;
+                          case 20:
+                args->xy.enabled=args->xy.sex_set=1;
+                if (!strcmp(optarg,"male")) args->xy.sex=1;
+                else if (!strcmp(optarg,"female")) args->xy.sex=2;
+                else if (!strcmp(optarg,"unknown")) args->xy.sex=0;
+                else error("--child-sex must be male, female, or unknown\n");
+                break;
+            case 21: args->xy.enabled=1; args->xy.dir=optarg; break;
+            case 22: args->xy.enabled=1; args->xy.masked=1; break;
+            case 'v': args->output_type = FT_VCF; break;
                           default:
                           {
                               args->clevel = strtol(optarg,&tmp,10);
@@ -978,6 +1046,9 @@ int run(int argc, char **argv)
     if ( args->ped_fname && args->pfm ) error("Expected only -p or -P option, not both\n");
     if ( !args->mode ) args->mode = MODE_COUNT;
 
+    if (args->xy.enabled && (args->rules_str || args->rules_fname)) error("Explicit XY policy cannot be combined with --rules/--rules-file\n");
+    if (args->xy.masked && !args->xy.dir) error("--ypar-masked requires --par-dir\n");
+    if (args->xy.enabled && (args->mode&MODE_DELETE)) error("Explicit XY policy preserves GT; --mode d is incompatible\n");
     init_data(args);
 
     while ( bcf_sr_next_line(args->sr) )

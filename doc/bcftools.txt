@@ -3063,6 +3063,83 @@ By default, appropriate system directories are searched for installed plugins.
 
 *mendelian2*::
     count Mendelian consistent / inconsistent genotypes.
++
+The XY fork adds an opt-in native policy. Without any of the three new
+options, upstream inheritance rules, annotations and counts are unchanged.
+The source baseline is YuanfengZhang/bcftools commit
+`e9ad5ec2fa91fecc060aec645c8eeb4b96c8e579` (develop, source version 1.25;
+the fork has no 1.24 tag). Tested with htslib commit
+`36ef0a191cf1c9ec2b2236640384926454a503fe` (1.25 development source).
++
+`--child-sex male|female|unknown` selects the child model, with an XX mother
+and XY father. Unknown never means female; autosomes remain evaluable.
+`--par-dir DIR` supplies four uniquely matched files ending in
+`chrX_PAR.bed[.gz]`, `chrX_nonPAR.bed[.gz]`, `chrY_PAR.bed[.gz]` and
+`chrY_nonPAR.bed[.gz]`. Coordinates are zero-based, half-open, nonnegative;
+intervals must not overlap, including across PAR/nonPAR files. X/chrX and
+Y/chrY are aliases. Gaps are not filled by a complement. All four files
+must be nonempty. Plain or gzip BED is accepted without an index.
+`--ypar-masked` is a pure flag (default off); `--ypar-masked=false` is
+rejected. It declares the calling pipeline's Y-PAR masking, not evidence
+that the input was aligned or called correctly. It requires valid resources.
+Any new option enables explicit mode. No child-sex option means unknown;
+no resources means XY records are excluded, not guessed. Explicit mode
+rejects --rules, --rules-file and genotype-deleting mode d. A unique child
+is required, and known PED or prefixed PFM sex must agree with explicit sex.
++
+An optional `par_regions.tsv` has columns `chrom start end region`, with
+an optional tab-separated header of those exact names. Region is PAR1 or
+PAR2 (X_PAR1/X_PAR2/Y_PAR1/Y_PAR2 also accepted). These assembly-specific
+intervals name PAR hits only; they never expand eligibility. Without a
+containing manifest interval, PAR is named X_PAR or Y_PAR, never numbered
+by BED fragment order. The complete reference span must lie in one model;
+pure prefix insertions use their anchor. Boundary/gap-crossing records
+are excluded. Symbolic alleles, breakends and spanning-deletion stars
+are unsupported. This evaluator compares alleles at each record; it does
+not perform haplotype replay or claim representation-invariant events.
++
+X-PAR requires the masking declaration and diploid mother, father and
+child. Y-PAR is always excluded. Male X-nonPAR requires only a diploid
+mother and haploid child. Female X-nonPAR requires a diploid mother,
+haploid father and diploid child, with one distinct child allele supplied
+by each parent. Male Y-nonPAR requires only haploid father and child;
+female Y-nonPAR is unsupported. Required members alone determine complete
+GT, ploidy and the nonreference threshold. Homozygous pseudo-diploid GT
+is folded only in the internal haploid view. Heterozygous haploid-region
+GT, missing required GT and all-required-reference records are excluded.
+Output GT is unchanged. No missing-to-reference conversion or quality
+threshold is applied.
++
+Every retained explicit-mode record receives scalar String INFO fields
+XY_STATUS (consistent, violation, not_evaluable, unsupported), XY_REASON
+and XY_REGION. Existing incompatible definitions are rejected; compatible
+values are overwritten on every record. Reasons in precedence order are
+unknown_child_sex, missing_region_resources, boundary_crossing,
+unclassified_region, y_par_excluded, par_requires_ypar_masked,
+female_y_nonpar, unsupported_variant, unsupported_replay,
+required_gt_missing, haploid_heterozygous, unexpected_ploidy,
+all_required_reference, then pass or mendelian_violation. Only
+female_y_nonpar and unsupported_variant/unsupported_replay use unsupported.
+The replay reason is reserved; this sitewise plugin does not replay.
+The native -m c summary adds `XY_REGION region N E error_rate` rows and
+`XY_REASON region reason count` rows (tab-separated). N includes only
+consistent plus violation required-member nonreference records; E includes
+violations. N=0 has rate NA. Existing MERR/MGOOD/MMISS annotations and
+summary counters follow the same native evaluation in explicit mode.
++
+Build with `make HTSDIR=/path/to/pinned/htslib -j8`, set BCFTOOLS_PLUGINS
+to the built plugins directory, then run, for example:
++
+----
+bcftools +mendelian2 input.vcf -p Child,Father,Mother --child-sex male --par-dir beds --ypar-masked -m a
+bcftools +mendelian2 input.vcf -p Child,Father,Mother --child-sex male --par-dir beds --ypar-masked -m c
+python3 -I test/test-mendelian2-xy.py
+perl test/test.pl -p -f mendelian2 -t .local/validation/upstream -i /path/to/htslib
+----
++
+The CLI tests execute the real compiled plugin and create synthetic fixtures
+only under ignored, untracked `.local/validation/`. Python is a test driver,
+not an alternate evaluator or an output-rewriting step.
 
 *missing2ref*::
     sets missing genotypes ("./.") to ref allele ("0/0" or "0|0")
