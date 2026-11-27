@@ -3,6 +3,19 @@ static int collect_xy_stats(args_t *args, bcf1_t *rec)
 {
     xy_policy_t *p=&args->xy;
     int chr=xy_chr(bcf_seqname(args->hdr,rec)), boundary=0;
+    /* Non-sex chromosomes keep the upstream evaluator and native counters.
+     * XY metadata is observational only on this route. */
+    if (!chr) {
+        int before_alt=args->trio[0].stats.ngood_alt;
+        int ret=collect_stats(args,rec);
+        int reason=(ret&HAS_MERR)?1:(ret&HAS_MISS)?9:(ret&HAS_GOOD)?0:10;
+        if (reason==0 && args->trio[0].stats.ngood_alt==before_alt) reason=12;
+        p->counts[9][reason]++;
+        bcf_update_info_string(args->hdr_out,rec,"XY_STATUS",reason==0?"consistent":reason==1?"violation":"not_evaluable");
+        bcf_update_info_string(args->hdr_out,rec,"XY_REASON",xy_reasons[reason]);
+        bcf_update_info_string(args->hdr_out,rec,"XY_REGION","autosome");
+        return ret;
+    }
     bcf_unpack(rec,BCF_UN_STR);
     int64_t end=rec->pos+rec->rlen;
     int pure_insertion=rec->n_allele>1;
@@ -59,16 +72,21 @@ static int collect_xy_stats(args_t *args, bcf1_t *rec)
             else if (ploidy) r=10;
             else if (!nonref) r=12;
             else {
-                /* A haploid source contributes exactly one allele. Homozygous pseudo2
-                 * is collapsed in this local view; input FORMAT/GT is never changed. */
-                int consistent=0;
+                /* Reuse upstream allele_bit/parse_gt and transmission tests.
+                 * Eligibility above guarantees complete GT and supported ploidy;
+                 * pseudo2 collapse is confined to the child/source bit view. */
+                uint8_t kid1,kid2,mom=0,dad=0,parent=0;
+                int als[7]={0}, nals=1;
+                parse_gt(&args->gt_arr[stride*trio->idx[iKID]],stride,&kid1,&kid2,als,&nals);
+                int consistent;
                 if (expected[iKID]==1) {
-                    int parent=expected[iMOM]?iMOM:iDAD;
-                    consistent=allele[iKID][0]==allele[parent][0] || (expected[parent]==2 && allele[iKID][0]==allele[parent][1]);
+                    int ipar=expected[iMOM]?iMOM:iDAD;
+                    parse_gt(&args->gt_arr[stride*trio->idx[ipar]],stride,&parent,&parent,als,&nals);
+                    consistent=parent&kid1;
                 } else {
-                    int c0=allele[iKID][0], c1=allele[iKID][1];
-                    int m0=allele[iMOM][0],m1=allele[iMOM][1],d0=allele[iDAD][0],d1=expected[iDAD]==2?allele[iDAD][1]:d0;
-                    consistent=((c0==m0 || c0==m1) && (c1==d0 || c1==d1)) || ((c1==m0 || c1==m1) && (c0==d0 || c0==d1));
+                    parse_gt(&args->gt_arr[stride*trio->idx[iMOM]],stride,&mom,&mom,als,&nals);
+                    parse_gt(&args->gt_arr[stride*trio->idx[iDAD]],stride,&dad,&dad,als,&nals);
+                    consistent=(kid1&dad && kid2&mom) || (kid1&mom && kid2&dad);
                 }
                 r=consistent?0:1;
             }

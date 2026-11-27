@@ -3066,6 +3066,13 @@ By default, appropriate system directories are searched for installed plugins.
 +
 The XY fork adds an opt-in native policy. Without any of the three new
 options, upstream inheritance rules, annotations and counts are unchanged.
+Even with the explicit policy, non-X/Y records call the upstream native
+evaluator unchanged: native MERR/MGOOD/MMISS and summary counters retain
+their original partial-missing, ploidy and reference-only semantics. Their
+XY metadata and nonreference N/E rows are observational, not a replacement
+for those upstream counters. Only X/Y eligibility and model routing are
+adapted; eligible transmission reuses the upstream allele-bit parsing and
+haploid/diploid bitmask comparisons.
 The source baseline is YuanfengZhang/bcftools commit
 `e9ad5ec2fa91fecc060aec645c8eeb4b96c8e579` (develop, source version 1.25;
 the fork has no 1.24 tag). Tested with htslib commit

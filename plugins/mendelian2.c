@@ -789,7 +789,7 @@ static int collect_stats(args_t *args, bcf1_t *rec)
 static int process_record(args_t *args, bcf1_t *rec)    // returns 1 to print rec, 0 to suppress printing
 {
     int skip_site = 0;
-    if ( !args->xy.enabled && (rec->n_allele==1 || bcf_get_variant_types(rec)==VCF_REF) )
+    if ( (!args->xy.enabled || !xy_chr(bcf_seqname(args->hdr,rec))) && (rec->n_allele==1 || bcf_get_variant_types(rec)==VCF_REF) )
     {
         args->nref_only++;
         skip_site = 1;

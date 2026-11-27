@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """CLI tests of the compiled native mendelian2 evaluator; no output rewriting."""
 import gzip
+import itertools
 import os
 from pathlib import Path
 import shutil
@@ -132,6 +133,37 @@ class NativeXY(unittest.TestCase):
             result = self.call(rows, mode=mode)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(len([x for x in result.stdout.splitlines() if not x.startswith('#')]), expected)
+
+    def test_explicit_autosomes_preserve_native_results(self) -> None:
+        genotypes = ('.', './.', '0/.', '0', '0/0', '0/1', '1/1', '1/2', '1/1/1')
+        rows = [self.row(chrom='1', child=c, dad=d, mom=m, alt='C,G')
+                for c, d, m in itertools.product(genotypes, repeat=3)]
+        explicit = self.call(rows)
+        native = subprocess.run([str(ROOT / 'bcftools'), '+mendelian2', str(WORK / 'input.vcf'),
+                                 '-p', 'Child,Father,Mother', '-m', 'a'],
+                                env=self.env, text=True, capture_output=True)
+        self.assertEqual(explicit.returncode, 0, explicit.stderr)
+        self.assertEqual(native.returncode, 0, native.stderr)
+
+        def records(text: str) -> list[list[str]]:
+            result: list[list[str]] = []
+            for line in text.splitlines():
+                if line.startswith('#'):
+                    continue
+                fields = line.split('\t')
+                fields[7] = ';'.join(item for item in fields[7].split(';') if not item.startswith('XY_'))
+                result.append(fields)
+            return result
+
+        self.assertEqual(records(explicit.stdout), records(native.stdout))
+        explicit_counts = self.call(rows, mode='c')
+        native_counts = subprocess.run([str(ROOT / 'bcftools'), '+mendelian2', str(WORK / 'input.vcf'),
+                                        '-p', 'Child,Father,Mother', '-m', 'c'],
+                                       env=self.env, text=True, capture_output=True)
+        self.assertEqual(explicit_counts.returncode, 0, explicit_counts.stderr)
+        self.assertEqual(native_counts.returncode, 0, native_counts.stderr)
+        self.assertEqual(explicit_counts.stdout.split('# Summary stats', 1)[1],
+                         native_counts.stdout.split('# Summary stats', 1)[1])
 
     def test_existing_info_headers(self) -> None:
         for tag in ('XY_STATUS', 'XY_REASON', 'XY_REGION'):
